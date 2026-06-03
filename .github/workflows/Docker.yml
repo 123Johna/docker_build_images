@@ -1,0 +1,128 @@
+name: Docker
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+env:
+  ALIYUN_REGISTRY: "${{ secrets.ALIYUN_REGISTRY }}"
+  ALIYUN_NAME_SPACE: "${{ secrets.ALIYUN_NAME_SPACE }}"
+  ALIYUN_REGISTRY_USER: "${{ secrets.ALIYUN_REGISTRY_USER }}"
+  ALIYUN_REGISTRY_PASSWORD: "${{ secrets.ALIYUN_REGISTRY_PASSWORD }}"
+
+jobs:
+  build:
+    name: BuildCustomImage
+    runs-on: ubuntu-latest
+    steps:
+    - name: Before freeing up disk space
+      run: |
+        echo "Before freeing up disk space"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    # 磁盘扩容（完全保留你原有配置）
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+      with:
+        root-reserve-mb: 2048
+        swap-size-mb: 128
+        remove-dotnet: 'true'
+        remove-haskell: 'true'
+        build-mount-path: '/var/lib/docker/'
+
+    - name: Restart docker
+      run: sudo service docker restart
+
+    - name: Free up disk space complete
+      run: |
+        echo "Free up disk space complete"
+        echo "=============================================================================="
+        df -hT
+        echo "=============================================================================="
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Docker Setup Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push custom image to Aliyun
+      run: |
+        # 登录阿里云镜像仓库
+        docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
+
+        #=====【原有重名镜像检测逻辑保留】=====
+        declare -A duplicate_images
+        declare -A temp_map
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ -z "$line" ]] && continue
+            if echo "$line" | grep -q '^\s*#'; then continue; fi
+
+            image=$(echo "$line" | awk '{print $NF}')
+            image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
+            name_space=$(echo "$image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else print ""}')
+            name_space="${name_space}_"
+            image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
+
+            if [[ -n "${temp_map[$image_name]}" ]]; then
+               if [[ "${temp_map[$image_name]}" != $name_space  ]]; then
+                  duplicate_images[$image_name]="true"
+               fi
+            else
+                temp_map[$image_name]=$name_space
+            fi
+        done < build.txt
+
+        #=====【核心改动：从pull改成docker build构建自定义镜像】=====
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ -z "$line" ]] && continue
+            if echo "$line" | grep -q '^\s*#'; then continue; fi
+
+            # 提取platform架构参数
+            platform=$(echo "$line" | awk -F'--platform[ =]' '{if (NF>1) print $2}' | awk '{print $1}')
+            if [ -z "$platform" ]; then
+                platform_prefix=""
+                build_platform=""
+            else
+                platform_prefix="${platform//\//_}_"
+                build_platform="--platform $platform"
+            fi
+
+            # 本地自定义镜像名
+            local_image=$(echo "$line" | awk '{print $NF}')
+            image_name_tag="${local_image%%@*}"
+            image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
+            name_space=$(echo "$local_image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else print ""}')
+
+            # 重名加命名空间前缀（沿用你原有规则）
+            name_space_prefix=""
+            if [[ -n "${duplicate_images[$image_name]}" ]]; then
+               if [[ -n "${name_space}" ]]; then
+                  name_space_prefix="${name_space}_"
+               fi
+            fi
+
+            # 阿里云目标镜像全路径
+            ali_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$platform_prefix$name_space_prefix$image_name_tag"
+
+            # 【关键】基于Dockerfile构建本地镜像，替换原来docker pull
+            echo "==========开始构建镜像: $local_image=========="
+            docker build $build_platform -t $local_image .
+
+            # tag为阿里云镜像地址 + push
+            echo "docker tag $local_image $ali_image"
+            docker tag $local_image $ali_image
+            echo "docker push $ali_image"
+            docker push $ali_image
+
+            # 清理本地镜像释放空间（保留你的清理逻辑）
+            echo "开始清理磁盘空间"
+            df -hT
+            docker rmi $local_image
+            docker rmi $ali_image
+            echo "磁盘空间清理完毕"
+            df -hT
+        done < build.txt
