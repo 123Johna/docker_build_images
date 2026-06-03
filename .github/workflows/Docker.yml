@@ -23,7 +23,7 @@ jobs:
         df -hT
         echo "=============================================================================="
 
-    # 磁盘扩容（完全保留你原有配置）
+    # 磁盘扩容
     - name: Maximize build space
       uses: easimon/maximize-build-space@master
       with:
@@ -49,12 +49,18 @@ jobs:
     - name: Docker Setup Buildx
       uses: docker/setup-buildx-action@v3
 
+    # ==========【关键：使用官方Action登录阿里云，彻底解决TTY报错，shell里不再写login】==========
+    - name: Login to AliYun ACR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.ALIYUN_REGISTRY }}
+        username: ${{ env.ALIYUN_REGISTRY_USER }}
+        password: ${{ env.ALIYUN_REGISTRY_PASSWORD }}
+
+    # 构建+推送，脚本内部移除docker login登录语句
     - name: Build and push custom image to Aliyun
       run: |
-        # 登录阿里云镜像仓库
-        echo $ALIYUN_REGISTRY_PASSWORD | docker login $ALIYUN_REGISTRY -u $ALIYUN_REGISTRY_USER --password-stdin
-
-        #=====【原有重名镜像检测逻辑保留】=====
+        # ====已删除原来的docker login命令，不需要再登录====
         declare -A duplicate_images
         declare -A temp_map
         while IFS= read -r line || [ -n "$line" ]; do
@@ -76,12 +82,10 @@ jobs:
             fi
         done < build.txt
 
-        #=====【核心改动：从pull改成docker build构建自定义镜像】=====
         while IFS= read -r line || [ -n "$line" ]; do
             [[ -z "$line" ]] && continue
             if echo "$line" | grep -q '^\s*#'; then continue; fi
 
-            # 提取platform架构参数
             platform=$(echo "$line" | awk -F'--platform[ =]' '{if (NF>1) print $2}' | awk '{print $1}')
             if [ -z "$platform" ]; then
                 platform_prefix=""
@@ -91,13 +95,11 @@ jobs:
                 build_platform="--platform $platform"
             fi
 
-            # 本地自定义镜像名
             local_image=$(echo "$line" | awk '{print $NF}')
             image_name_tag="${local_image%%@*}"
             image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
             name_space=$(echo "$local_image" | awk -F'/' '{if (NF==3) print $2; else if (NF==2) print $1; else print ""}')
 
-            # 重名加命名空间前缀（沿用你原有规则）
             name_space_prefix=""
             if [[ -n "${duplicate_images[$image_name]}" ]]; then
                if [[ -n "${name_space}" ]]; then
@@ -105,20 +107,16 @@ jobs:
                fi
             fi
 
-            # 阿里云目标镜像全路径
             ali_image="$ALIYUN_REGISTRY/$ALIYUN_NAME_SPACE/$platform_prefix$name_space_prefix$image_name_tag"
 
-            # 【关键】基于Dockerfile构建本地镜像，替换原来docker pull
             echo "==========开始构建镜像: $local_image=========="
             docker build $build_platform -t $local_image .
 
-            # tag为阿里云镜像地址 + push
             echo "docker tag $local_image $ali_image"
             docker tag $local_image $ali_image
             echo "docker push $ali_image"
             docker push $ali_image
 
-            # 清理本地镜像释放空间（保留你的清理逻辑）
             echo "开始清理磁盘空间"
             df -hT
             docker rmi $local_image
