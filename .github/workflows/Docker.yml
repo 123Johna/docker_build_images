@@ -52,7 +52,7 @@ jobs:
     - name: Build and push custom image to Aliyun
       run: |
         # 登录阿里云镜像仓库
-        docker login -u $ALIYUN_REGISTRY_USER -p $ALIYUN_REGISTRY_PASSWORD $ALIYUN_REGISTRY
+        echo $ALIYUN_REGISTRY_PASSWORD | docker login $ALIYUN_REGISTRY -u $ALIYUN_REGISTRY_USER --password-stdin
 
         #=====【原有重名镜像检测逻辑保留】=====
         declare -A duplicate_images
